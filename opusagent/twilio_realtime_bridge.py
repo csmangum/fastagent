@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 from fastapi import WebSocket
 from fastapi.websockets import WebSocketDisconnect
 
+from opusagent.base_realtime_bridge import BaseRealtimeBridge
 from opusagent.config.logging_config import configure_logging
 from opusagent.function_handler import FunctionHandler
 
@@ -90,7 +91,7 @@ LOG_EVENT_TYPES = [
 ]
 
 
-class TwilioRealtimeBridge:
+class TwilioRealtimeBridge(BaseRealtimeBridge):
     """Bridge class for handling bidirectional communication between Twilio Media Streams and OpenAI Realtime API.
 
     This class manages the WebSocket connections between Twilio Media Streams and the OpenAI Realtime API,
@@ -103,14 +104,6 @@ class TwilioRealtimeBridge:
         account_sid (Optional[str]): Twilio account SID
         call_sid (Optional[str]): Twilio call SID
         media_format (Optional[str]): Audio format being used for the session
-        session_initialized (bool): Whether the OpenAI Realtime API session has been initialized
-        speech_detected (bool): Whether speech is currently being detected
-        _closed (bool): Flag indicating whether the bridge connections are closed
-        audio_chunks_sent (int): Number of audio chunks sent to the OpenAI Realtime API
-        total_audio_bytes_sent (int): Total number of bytes sent to the OpenAI Realtime API
-        input_transcript_buffer (list): Buffer for accumulating input audio transcriptions
-        output_transcript_buffer (list): Buffer for accumulating output audio transcriptions
-        function_handler (FunctionHandler): Handler for managing function calls from the OpenAI Realtime API
         audio_buffer (list): Buffer for accumulating audio data before processing
         mark_counter (int): Counter for generating unique mark identifiers
     """
@@ -126,38 +119,15 @@ class TwilioRealtimeBridge:
             twilio_websocket (WebSocket): FastAPI WebSocket connection for Twilio Media Streams
             realtime_websocket (websockets.WebSocketClientProtocol): WebSocket connection to OpenAI Realtime API
         """
-        self.twilio_websocket = twilio_websocket
-        self.realtime_websocket = realtime_websocket
+        super().__init__(twilio_websocket, realtime_websocket)
+        self.twilio_websocket = twilio_websocket  # Override base class attribute name
         self.stream_sid: Optional[str] = None
         self.account_sid: Optional[str] = None
         self.call_sid: Optional[str] = None
         self.media_format: Optional[str] = None
-        self.session_initialized = False
-        self.speech_detected = False
-        self._closed = False
-
-        # Audio buffer tracking for debugging
-        self.audio_chunks_sent = 0
-        self.total_audio_bytes_sent = 0
         self.audio_buffer = []
-
-        # Transcript buffers for logging full transcripts
-        self.input_transcript_buffer = []  # User → AI
-        self.output_transcript_buffer = []  # AI → User
-
-        # Mark counter for audio synchronization
         self.mark_counter = 0
-
-        # Commit task for delayed audio buffer processing
         self._commit_task = None
-
-        # Response state tracking to prevent race conditions
-        self.response_active = False  # Track if response is being generated
-        self.pending_user_input = None  # Queue for user input during active response
-        self.response_id_tracker = None  # Track current response ID
-
-        # Initialize function handler
-        self.function_handler = FunctionHandler(realtime_websocket)
 
         # Create event handler mappings for Twilio events
         self.twilio_event_handlers = {
@@ -168,87 +138,6 @@ class TwilioRealtimeBridge:
             TwilioEventType.DTMF: self.handle_dtmf,
             TwilioEventType.MARK: self.handle_mark,
         }
-
-        # Create event handler mappings for realtime events
-        self.realtime_event_handlers = {
-            # Session events
-            ServerEventType.SESSION_UPDATED: self.handle_session_update,
-            ServerEventType.SESSION_CREATED: self.handle_session_update,
-            # Conversation events
-            ServerEventType.CONVERSATION_ITEM_CREATED: lambda x: logger.info(
-                "Conversation item created"
-            ),
-            # Speech detection events
-            ServerEventType.INPUT_AUDIO_BUFFER_SPEECH_STARTED: self.handle_speech_detection,
-            ServerEventType.INPUT_AUDIO_BUFFER_SPEECH_STOPPED: self.handle_speech_detection,
-            ServerEventType.INPUT_AUDIO_BUFFER_COMMITTED: self.handle_speech_detection,
-            # Response events
-            ServerEventType.RESPONSE_CREATED: self.handle_response_created,
-            ServerEventType.RESPONSE_AUDIO_DELTA: self.handle_audio_response_delta,
-            ServerEventType.RESPONSE_AUDIO_DONE: self.handle_audio_response_completion,
-            ServerEventType.RESPONSE_TEXT_DELTA: self.handle_text_and_transcript,
-            ServerEventType.RESPONSE_AUDIO_TRANSCRIPT_DELTA: self.handle_audio_transcript_delta,
-            ServerEventType.RESPONSE_AUDIO_TRANSCRIPT_DONE: self.handle_audio_transcript_done,
-            ServerEventType.RESPONSE_DONE: self.handle_response_completion,
-            # Add new handlers for output item and content part events
-            ServerEventType.RESPONSE_OUTPUT_ITEM_ADDED: self.handle_output_item_added,
-            ServerEventType.RESPONSE_CONTENT_PART_ADDED: self.handle_content_part_added,
-            ServerEventType.RESPONSE_CONTENT_PART_DONE: self.handle_content_part_done,
-            ServerEventType.RESPONSE_OUTPUT_ITEM_DONE: self.handle_output_item_done,
-            # Add handlers for input audio transcription events
-            ServerEventType.CONVERSATION_ITEM_INPUT_AUDIO_TRANSCRIPTION_DELTA: self.handle_input_audio_transcription_delta,
-            ServerEventType.CONVERSATION_ITEM_INPUT_AUDIO_TRANSCRIPTION_COMPLETED: self.handle_input_audio_transcription_completed,
-            # Add new handler for function call events
-            ServerEventType.RESPONSE_FUNCTION_CALL_ARGUMENTS_DELTA: self.function_handler.handle_function_call_arguments_delta,
-            ServerEventType.RESPONSE_FUNCTION_CALL_ARGUMENTS_DONE: self.function_handler.handle_function_call_arguments_done,
-        }
-
-    async def close(self):
-        """Safely close both WebSocket connections.
-
-        This method ensures both the Twilio and OpenAI Realtime API WebSocket connections
-        are properly closed, handling any exceptions that may occur during the process.
-        """
-        if not self._closed:
-            self._closed = True
-            
-            # Cancel any pending commit task
-            if self._commit_task is not None:
-                self._commit_task.cancel()
-                try:
-                    await self._commit_task
-                except asyncio.CancelledError:
-                    pass
-            
-            try:
-                if (
-                    self.realtime_websocket
-                    and self.realtime_websocket.close_code is None
-                ):
-                    await self.realtime_websocket.close()
-            except Exception as e:
-                logger.error(f"Error closing OpenAI connection: {e}")
-            try:
-                if self.twilio_websocket and not self._is_websocket_closed():
-                    await self.twilio_websocket.close()
-            except Exception as e:
-                logger.error(f"Error closing Twilio connection: {e}")
-
-    def _is_websocket_closed(self):
-        """Check if Twilio WebSocket is closed.
-
-        Returns True if the WebSocket is closed or in an unusable state.
-        """
-        try:
-            from starlette.websockets import WebSocketState
-
-            return (
-                not self.twilio_websocket
-                or self.twilio_websocket.client_state == WebSocketState.DISCONNECTED
-            )
-        except ImportError:
-            # Fallback check without WebSocketState
-            return not self.twilio_websocket
 
     async def handle_connected(self, data):
         """Handle 'connected' message from Twilio.
@@ -290,7 +179,7 @@ class TwilioRealtimeBridge:
 
         # Initialize OpenAI session if not already done
         if not self.session_initialized:
-            await self.initialize_openai_session()
+            await self.initialize_openai_session(SYSTEM_MESSAGE, DEFAULT_MODEL)
 
     async def handle_media(self, data):
         """Handle 'media' message containing audio data from Twilio.
@@ -444,9 +333,6 @@ class TwilioRealtimeBridge:
         digit = dtmf_msg.dtmf.digit
         logger.info(f"DTMF digit pressed: {digit}")
 
-        # You could send this as a text message to OpenAI if needed
-        # For now, just log it
-
     async def handle_mark(self, data):
         """Handle 'mark' message from Twilio.
 
@@ -509,74 +395,6 @@ class TwilioRealtimeBridge:
                 logger.info("Response became inactive while queuing - processing immediately")
                 await self._create_response()
                 self.pending_user_input = None
-
-    async def _create_response(self):
-        """Create a new response request to OpenAI Realtime API.
-        
-        This helper method contains the response creation logic extracted from
-        _trigger_response to enable reuse and better error handling.
-        """
-        try:
-            response_create = {
-                "type": "response.create",
-                "response": {
-                    "modalities": ["text", "audio"],
-                    "output_audio_format": "pcm16",
-                    "temperature": 0.8,
-                    "max_output_tokens": 4096,
-                    "voice": VOICE,
-                },
-            }
-            await self.realtime_websocket.send(json.dumps(response_create))
-            logger.info("Response creation triggered")
-        except Exception as e:
-            logger.error(f"Error creating response: {e}")
-
-    # OpenAI event handlers (similar to AudioCodes bridge)
-
-    async def handle_session_update(self, response_dict):
-        """Handle session update events from the OpenAI Realtime API."""
-        response_type = response_dict["type"]
-
-        if response_type == ServerEventType.SESSION_UPDATED:
-            logger.info("OpenAI session updated successfully")
-        elif response_type == ServerEventType.SESSION_CREATED:
-            logger.info("OpenAI session created successfully")
-            self.session_initialized = True
-            try:
-                await self.send_initial_conversation_item()
-            except Exception as e:
-                logger.error(f"Error sending initial conversation item: {e}")
-
-    async def handle_speech_detection(self, response_dict):
-        """Handle speech detection events from the OpenAI Realtime API."""
-        response_type = response_dict["type"]
-
-        if response_type == ServerEventType.INPUT_AUDIO_BUFFER_SPEECH_STARTED:
-            logger.info("Speech started detected")
-            self.speech_detected = True
-            # Cancel any pending commit task since speech is ongoing
-            if self._commit_task is not None:
-                self._commit_task.cancel()
-                self._commit_task = None
-                
-        elif response_type == ServerEventType.INPUT_AUDIO_BUFFER_SPEECH_STOPPED:
-            logger.info("Speech stopped detected - committing audio buffer")
-            self.speech_detected = False
-            
-            # Cancel any existing delayed commit task
-            if self._commit_task is not None:
-                self._commit_task.cancel()
-                self._commit_task = None
-            
-            # Immediately commit when speech stops for faster response
-            try:
-                await self._commit_audio_buffer()
-            except Exception as e:
-                logger.error(f"Error committing audio after speech stopped: {e}")
-                
-        elif response_type == ServerEventType.INPUT_AUDIO_BUFFER_COMMITTED:
-            logger.info("Audio buffer committed confirmed by OpenAI")
 
     async def handle_audio_response_delta(self, response_dict):
         """Handle audio response delta events from the OpenAI Realtime API.
@@ -649,126 +467,6 @@ class TwilioRealtimeBridge:
             await self.twilio_websocket.send_json(mark_message.model_dump())
             logger.info(f"Sent mark to Twilio: {mark_name}")
 
-    async def handle_response_created(self, response_dict):
-        """Handle response created events from the OpenAI Realtime API.
-
-        This method tracks when response generation starts to prevent race conditions.
-
-        Args:
-            response_dict (dict): The response data from the OpenAI Realtime API
-        """
-        self.response_active = True
-        response_data = response_dict.get("response", {})
-        self.response_id_tracker = response_data.get("id")
-        logger.info(f"Response generation started: {self.response_id_tracker}")
-        
-        # Log pending input status for debugging
-        if self.pending_user_input:
-            logger.info(f"Note: Pending user input exists while starting new response")
-
-    async def handle_response_completion(self, response_dict):
-        """Handle response completion events from the OpenAI Realtime API.
-
-        This method processes the final completion of a response and processes
-        any pending user input that was queued during response generation.
-
-        Args:
-            response_dict (dict): The response data from the OpenAI Realtime API
-        """
-        response_done = ResponseDoneEvent(**response_dict)
-        self.response_active = False
-        self.response_id_tracker = None  # Reset response ID tracker
-        response_id = response_done.response.get("id") if response_done.response else None
-        logger.info(f"Response generation completed: {response_id}")
-
-        # Process any pending user input that was queued during response generation
-        if self.pending_user_input:
-            logger.info("Processing queued user input after response completion")
-            try:
-                await self._create_response()
-                logger.info("Successfully processed queued user input")
-            except Exception as e:
-                logger.error(f"Error processing queued user input: {e}")
-            finally:
-                self.pending_user_input = None
-
-    # Additional handlers (similar to AudioCodes bridge)
-
-    async def handle_text_and_transcript(self, response_dict):
-        """Handle text and transcript events from OpenAI."""
-        response_type = response_dict["type"]
-
-        if response_type == ServerEventType.RESPONSE_TEXT_DELTA:
-            text_delta = ResponseTextDeltaEvent(**response_dict)
-            logger.info(f"Text delta received: {text_delta.delta}")
-
-    async def handle_audio_transcript_delta(self, response_dict):
-        """Handle audio transcript delta events from OpenAI."""
-        delta = response_dict.get("delta", "")
-        if delta:
-            self.output_transcript_buffer.append(delta)
-        logger.debug(f"Audio transcript delta: {delta}")
-
-    async def handle_audio_transcript_done(self, response_dict):
-        """Handle audio transcript completion events from OpenAI."""
-        full_transcript = "".join(self.output_transcript_buffer)
-        logger.info(f"Full AI transcript: {full_transcript}")
-        self.output_transcript_buffer.clear()
-
-    async def handle_input_audio_transcription_delta(self, response_dict):
-        """Handle input audio transcription delta events from OpenAI."""
-        delta = response_dict.get("delta", "")
-        if delta:
-            self.input_transcript_buffer.append(delta)
-        logger.debug(f"Input audio transcription delta: {delta}")
-
-    async def handle_input_audio_transcription_completed(self, response_dict):
-        """Handle input audio transcription completion events from OpenAI."""
-        full_transcript = "".join(self.input_transcript_buffer)
-        logger.info(f"Full user transcript: {full_transcript}")
-        self.input_transcript_buffer.clear()
-
-    async def handle_output_item_added(self, response_dict):
-        """Handle output item added events from OpenAI."""
-        item = response_dict.get("item", {})
-        logger.info(f"Output item added: {item}")
-
-        # Handle function calls similar to AudioCodes bridge
-        if item.get("type") == "function_call":
-            call_id = item.get("call_id")
-            function_name = item.get("name")
-            item_id = item.get("id")
-
-            if call_id and function_name:
-                if call_id not in self.function_handler.active_function_calls:
-                    self.function_handler.active_function_calls[call_id] = {
-                        "arguments_buffer": "",
-                        "item_id": item_id,
-                        "output_index": response_dict.get("output_index", 0),
-                        "response_id": response_dict.get("response_id"),
-                        "function_name": function_name,
-                    }
-                else:
-                    self.function_handler.active_function_calls[call_id][
-                        "function_name"
-                    ] = function_name
-
-                logger.info(
-                    f"Function call captured: {function_name} (call_id: {call_id})"
-                )
-
-    async def handle_content_part_added(self, response_dict):
-        """Handle content part added events from OpenAI."""
-        logger.info(f"Content part added: {response_dict.get('part', {})}")
-
-    async def handle_content_part_done(self, response_dict):
-        """Handle content part completion events from OpenAI."""
-        logger.info("Content part completed")
-
-    async def handle_output_item_done(self, response_dict):
-        """Handle output item completion events from OpenAI."""
-        logger.info("Output item completed")
-
     def _get_twilio_event_type(self, event_str):
         """Convert a string event type to a TwilioEventType enum value."""
         try:
@@ -776,7 +474,7 @@ class TwilioRealtimeBridge:
         except ValueError:
             return None
 
-    async def receive_from_twilio(self):
+    async def receive_from_telephony(self):
         """Receive and process messages from Twilio Media Streams WebSocket."""
         try:
             async for message in self.twilio_websocket.iter_text():
@@ -818,136 +516,3 @@ class TwilioRealtimeBridge:
         except Exception as e:
             logger.error(f"Error in receive_from_twilio: {e}")
             await self.close()
-
-    async def receive_from_realtime(self):
-        """Receive and process events from the OpenAI Realtime API."""
-        try:
-            async for openai_message in self.realtime_websocket:
-                if self._closed:
-                    break
-
-                response_dict = json.loads(openai_message)
-                response_type = response_dict["type"]
-                
-                # Log all OpenAI events for debugging
-                if response_type in ["response.audio.delta", "response.audio_transcript.delta"]:
-                    logger.debug(f"Received OpenAI message type: {response_type}")
-                else:
-                    logger.info(f"Received OpenAI message type: {response_type}")
-
-                # Handle log events first
-                if response_type in [event.value for event in LOG_EVENT_TYPES]:
-                    await self.handle_log_event(response_dict)
-                    continue
-
-                # Dispatch to appropriate handler
-                handler = self.realtime_event_handlers.get(response_type)
-                if handler:
-                    try:
-                        if asyncio.iscoroutinefunction(handler):
-                            await handler(response_dict)
-                        else:
-                            handler(response_dict)
-                    except Exception as e:
-                        logger.error(f"Error in handler for {response_type}: {e}")
-                else:
-                    logger.warning(f"Unknown OpenAI event type: {response_type}")
-
-        except websockets.exceptions.ConnectionClosed as e:
-            logger.error(f"OpenAI WebSocket connection closed: {e}")
-            await self.close()
-        except Exception as e:
-            logger.error(f"Error in receive_from_realtime: {e}")
-            if not self._closed:
-                await self.close()
-
-    async def handle_log_event(self, response_dict):
-        """Handle log events from OpenAI (similar to AudioCodes bridge)."""
-        response_type = response_dict["type"]
-
-        if response_type == "error":
-            error_code = response_dict.get("code", "unknown")
-            error_message = response_dict.get("message", "No message provided")
-            logger.error(f"OpenAI Error: {error_code} - {error_message}")
-        elif response_type == "input_audio_buffer.speech_started":
-            logger.info("OpenAI detected speech started")
-        elif response_type == "input_audio_buffer.speech_stopped": 
-            logger.info("OpenAI detected speech stopped")
-        elif response_type == "input_audio_buffer.committed":
-            logger.info("OpenAI confirmed audio buffer committed")
-        elif response_type == "response.done":
-            logger.info("OpenAI response completed")
-        else:
-            logger.debug(f"OpenAI log event: {response_type}")
-
-    async def initialize_openai_session(self):
-        """Initialize the OpenAI Realtime API session."""
-        session_config = SessionConfig(
-            input_audio_format="pcm16",
-            output_audio_format="pcm16",
-            voice=VOICE,
-            instructions=SYSTEM_MESSAGE,
-            modalities=["text", "audio"],
-            temperature=0.8,
-            model=DEFAULT_MODEL,
-            tools=[
-                # Add your function tools here (same as AudioCodes bridge)
-                {
-                    "type": "function",
-                    "name": "call_intent",
-                    "description": "Get the user's intent.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "intent": {
-                                "type": "string",
-                                "enum": [
-                                    "card_replacement",
-                                    "account_inquiry",
-                                    "other",
-                                ],
-                            },
-                        },
-                        "required": ["intent"],
-                    },
-                },
-                # Add other tools as needed...
-            ],
-            input_audio_noise_reduction={"type": "near_field"},
-            input_audio_transcription={"model": "whisper-1"},
-            max_response_output_tokens=4096,
-            tool_choice="auto",
-        )
-
-        session_update = SessionUpdateEvent(
-            type="session.update", session=session_config
-        )
-        logger.info("Initializing OpenAI session for Twilio bridge")
-        await self.realtime_websocket.send(session_update.model_dump_json())
-
-    async def send_initial_conversation_item(self):
-        """Send initial conversation item to start the AI interaction."""
-        try:
-            initial_conversation = {
-                "type": "conversation.item.create",
-                "item": {
-                    "type": "message",
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "input_text",
-                            "text": "You are a customer service agent for Bank of Peril. Start by saying 'Hello! How can I help you today?'",
-                        }
-                    ],
-                },
-            }
-
-            await self.realtime_websocket.send(json.dumps(initial_conversation))
-            await asyncio.sleep(1)
-
-            # Trigger initial response
-            await self._trigger_response()
-            logger.info("Initial conversation flow initiated")
-
-        except Exception as e:
-            logger.error(f"Error sending initial conversation item: {e}")
