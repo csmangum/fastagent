@@ -6,7 +6,6 @@ All prompts and templates used in the card replacement conversation flow.
 
 # Base prompt template for the card replacement flow
 BASE_PROMPT = """
-#! Any of this redundant? Should we just have the system instruction?
 You are a customer service representative for {organization_name}.
 
 {organization_rules}
@@ -19,6 +18,8 @@ Based on the customer's request, call the call_intent function with the intent.
 
 Current intents:
 - card_replacement
+- account_inquiry
+- transfer_to_human
 - other
 """
 
@@ -46,7 +47,6 @@ Valid reasons:
 """
 
 # Prompt for confirming the address for card delivery
-#! prompt guide the arguments
 CONFIRM_ADDRESS_PROMPT = """
 The customer wants to replace their {card_in_context}. We need the address to mail the new card.
 The address on file with this card is: {address_on_file}.
@@ -63,7 +63,7 @@ Let them know you are starting the card replacement process.
 # Prompt for finishing the card replacement process
 FINISH_CARD_REPLACEMENT_PROMPT = """
 The card replacement process is complete.
-Let them know you are sending the new {card_in_context} to {address_in_context} and it will arrive in 5-7 business days.
+Let them know you are sending the new {card_in_context} and it will arrive in 5-7 business days.
 Also ask if they have any other questions.
 """
 

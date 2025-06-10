@@ -10,6 +10,7 @@ providing the infrastructure to:
 
 The WebSocketManager class is the central component that orchestrates all WebSocket
 communications between the AudioCodes VoiceAI Connect platform and the voice bot implementation.
+#! This module is not being used.
 """
 
 import json

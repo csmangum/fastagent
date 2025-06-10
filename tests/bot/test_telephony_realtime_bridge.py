@@ -940,16 +940,4 @@ async def test_create_response_helper(bridge):
     assert sent_data["type"] == "response.create"
     assert sent_data["response"]["modalities"] == ["text", "audio"]
     assert sent_data["response"]["output_audio_format"] == "pcm16"
-    assert sent_data["response"]["voice"] == "alloy"
-
-# For tests that require _trigger_response, patch it if not present
-@pytest.fixture(autouse=True)
-def patch_trigger_response(monkeypatch):
-    from opusagent.telephony_realtime_bridge import TelephonyRealtimeBridge
-    if not hasattr(TelephonyRealtimeBridge, "_trigger_response"):
-        async def _trigger_response(self):
-            if not self.response_active:
-                await self._create_response()
-            else:
-                self.pending_user_input = {"audio_committed": True, "timestamp": 0}
-        monkeypatch.setattr(TelephonyRealtimeBridge, "_trigger_response", _trigger_response)
+    assert sent_data["response"]["voice"] == "verse"

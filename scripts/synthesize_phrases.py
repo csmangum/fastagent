@@ -18,7 +18,7 @@ phrases = [
     "Actually, I moved. Can you send it to 456 Oak Ave?"
 ]
 
-VOICE = "nova"
+VOICE = "ash"
 OUTPUT_DIR = "output_audio"
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -26,7 +26,7 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 for idx, phrase in enumerate(phrases, 1):
     print(f"Synthesizing phrase {idx}: {phrase}")
     response = openai.audio.speech.create(
-        model="tts-1",
+        model="gpt-4o-mini-tts",
         voice=VOICE,
         input=phrase,
         response_format="wav"

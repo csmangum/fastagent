@@ -1,169 +1,121 @@
-
 ```mermaid
 sequenceDiagram
-    participant AC as AudioCodes VAIC
-    participant VB as Voice Bot
-    participant OAI as OpenAI Realtime API
+    participant AC as Telephony Server
+    participant TB as OpusBridge Server
+    participant OAI as Realtime Voice Server
 
-    %% Session Initialization
-    AC->>VB: session.initiate (conversationId, mediaFormat)
-    VB->>OAI: WebSocket Connection
-    VB->>OAI: SessionUpdateEvent (model, voice, turn_detection)
-    OAI->>VB: SessionCreatedEvent
-    VB->>AC: session.accepted (mediaFormat)
+    %% Session Initiation
+    AC->>TB: session.initiate (conversationId, mediaFormat)
+    TB->>TB: Initialize CallRecorder
+    TB->>AC: session.accepted (conversationId, mediaFormat)
+    TB->>OAI: session.update (config, tools, instructions)
+    OAI->>TB: session.updated
+    TB->>OAI: conversation.item.create (initial greeting)
+    OAI->>TB: conversation.item.created
+    TB->>OAI: response.create
+    OAI->>TB: response.created (response_active = true)
     
-    %% Audio Exchange Start
-    AC->>VB: userStream.start
-    VB->>AC: userStream.started
+    %% Audio Streaming Flow
+    AC->>TB: userStream.start
+    TB->>AC: userStream.started
+    loop Audio Chunks
+        AC->>TB: userStream.chunk (audioChunk base64)
+        TB->>TB: Validate chunk size (min 3200 bytes)
+        TB->>TB: Record caller audio
+        TB->>OAI: input_audio_buffer.append (audio)
+    end
+    AC->>TB: userStream.stop
+    TB->>OAI: input_audio_buffer.commit
+    TB->>AC: userStream.stopped
     
-    %% Audio Streaming (User to Bot)
-    loop Caller Audio Chunks
-        AC->>VB: userStream.chunk (audioChunk)
-        VB->>OAI: InputAudioBufferAppendEvent (audio base64)
+    %% Speech Detection & Transcription
+    OAI->>TB: input_audio_buffer.speech_started
+    OAI->>TB: input_audio_buffer.speech_stopped
+    OAI->>TB: conversation.item.input_audio_transcription.delta
+    OAI->>TB: conversation.item.input_audio_transcription.completed
+    TB->>TB: Record caller transcript
+    
+    %% AI Response Generation
+    TB->>OAI: response.create (if not response_active)
+    OAI->>TB: response.created
+    OAI->>TB: response.output_item.added
+    
+    %% Function Call Handling (if triggered)
+    opt Function Call Flow
+        OAI->>TB: response.function_call_arguments.delta
+        TB->>TB: Accumulate function arguments
+        OAI->>TB: response.function_call_arguments.done
+        TB->>TB: Execute function via FunctionHandler
+        TB->>OAI: conversation.item.create (function_call_output)
+        TB->>OAI: response.create
     end
     
-    %% User Turn End
-    AC->>VB: userStream.stop
-    VB->>OAI: InputAudioBufferCommitEvent
-    VB->>AC: userStream.stopped
+    %% Audio Response Flow
+    TB->>AC: playStream.start (streamId, mediaFormat)
+    loop Audio Response
+        OAI->>TB: response.audio.delta
+        TB->>TB: Record bot audio
+        TB->>AC: playStream.chunk (audioChunk base64)
+    end
+    OAI->>TB: response.audio.done
+    TB->>AC: playStream.stop
     
-    %% OpenAI Processing
-    Note over OAI: Internal processing
+    %% Transcript Handling
+    OAI->>TB: response.audio_transcript.delta
+    OAI->>TB: response.audio_transcript.done
+    TB->>TB: Record bot transcript
     
-    %% Bot Response
-    OAI->>VB: ResponseTextDeltaEvent (text)
-    
-    %% Audio Response
-    VB->>AC: playStream.start (streamId, mediaFormat)
-    
-    loop Bot Audio Chunks
-        OAI->>VB: ResponseAudioDeltaEvent (audio base64)
-        VB->>AC: playStream.chunk (streamId, audioChunk)
+    %% Response Completion
+    OAI->>TB: response.done (response_active = false)
+    TB->>TB: Check for pending user input
+    opt Pending Input Exists
+        TB->>OAI: response.create
     end
     
-    OAI->>VB: ResponseDoneEvent
-    VB->>AC: playStream.stop (streamId)
-    
-    %% Optional: Function Calling Flow
-    alt Function Calling
-        OAI->>VB: FunctionCallEvent (name, arguments)
-        VB->>VB: Execute function
-        VB->>OAI: ConversationItemCreateEvent (function output)
-        OAI->>VB: ResponseTextDeltaEvent (text)
-        
-        %% Resume Audio Response
-        VB->>AC: playStream.start (newStreamId, mediaFormat)
-        loop Bot Audio Chunks
-            OAI->>VB: ResponseAudioDeltaEvent (audio base64)
-            VB->>AC: playStream.chunk (newStreamId, audioChunk)
-        end
-        OAI->>VB: ResponseDoneEvent
-        VB->>AC: playStream.stop (newStreamId)
-    end
-    
-    %% Multi-Turn Conversation Loop
-    loop Conversation Continues
-        %% Next User Turn
-        AC->>VB: userStream.start
-        VB->>AC: userStream.started
-        
-        loop Caller Audio Chunks
-            AC->>VB: userStream.chunk (audioChunk)
-            VB->>OAI: InputAudioBufferAppendEvent (audio base64)
-        end
-        
-        AC->>VB: userStream.stop
-        VB->>OAI: InputAudioBufferCommitEvent
-        VB->>AC: userStream.stopped
-        
-        %% Next Bot Response
-        OAI->>VB: ResponseTextDeltaEvent (text)
-        VB->>AC: playStream.start (streamId, mediaFormat)
-        
-        loop Bot Audio Chunks
-            OAI->>VB: ResponseAudioDeltaEvent (audio base64)
-            VB->>AC: playStream.chunk (streamId, audioChunk)
-        end
-        
-        OAI->>VB: ResponseDoneEvent
-        VB->>AC: playStream.stop (streamId)
-    end
-    
-    %% Call Termination
-    AC->>VB: session.end (reasonCode)
-    VB->>OAI: Close WebSocket Connection
-    
-    %% Optional: DTMF Events
-    alt DTMF Handling
-        AC->>VB: activities (dtmf)
-        VB->>OAI: ConversationItemCreateEvent (dtmf text)
-    end
+    %% Session Termination
+    AC->>TB: session.end
+    TB->>TB: Stop CallRecorder and finalize
+    TB->>TB: Close connections
 ```
 
 ---
 
-CALL FLOW: AudioCodes VAIC to OpenAI Realtime API Bridge
+## Additional Technical Details
 
-Session Initialization:
-1. AudioCodes → Voice Bot: session.initiate (conversationId, mediaFormat)
-2. Voice Bot → OpenAI: WebSocket Connection
-3. Voice Bot → OpenAI: SessionUpdateEvent (model, voice, turn_detection)
-4. OpenAI → Voice Bot: SessionCreatedEvent
-5. Voice Bot → AudioCodes: session.accepted (mediaFormat)
+### Audio Specifications
+- **Format**: PCM16, 16kHz, mono
+- **Minimum chunk**: 3200 bytes (100ms)
+- **Encoding**: Base64 for transport
+- **Validation**: Auto-padding for undersized chunks
 
-Audio Exchange Start:
-6. AudioCodes → Voice Bot: userStream.start
-7. Voice Bot → AudioCodes: userStream.started
+### Function Registry (12 Banking Functions)
+- `get_balance` - Account balance lookup
+- `transfer_funds` - Money transfers  
+- `call_intent` - Intent classification
+- `member_account_confirmation` - Card account selection
+- `replacement_reason` - Card replacement reasons
+- `confirm_address` - Address verification
+- `start_card_replacement` - Begin replacement process
+- `finish_card_replacement` - Complete replacement
+- `wrap_up` - Call conclusion
+- `loan_type_selection` - Loan product selection
+- `income_verification` - Income validation
+- `transfer_to_human` - Escalation to human agent
 
-Audio Streaming (User to Bot):
-8. AudioCodes → Voice Bot: userStream.chunk (audioChunk) [multiple times]
-9. Voice Bot → OpenAI: InputAudioBufferAppendEvent (audio base64) [multiple times]
+### State Management
+- **Response Race Prevention**: `response_active` flag + `pending_user_input` queue
+- **Stream Tracking**: `active_stream_id` for audio flow control
+- **Buffer Management**: Separate transcript buffers for input/output
+- **Function Call State**: `active_function_calls` dictionary with incremental argument building
 
-User Turn End:
-10. AudioCodes → Voice Bot: userStream.stop
-11. Voice Bot → OpenAI: InputAudioBufferCommitEvent
-12. Voice Bot → AudioCodes: userStream.stopped
+### Recording & Monitoring
+- **CallRecorder**: Persistent audio + transcript storage
+- **Channels**: CALLER vs BOT audio separation
+- **Formats**: Both raw audio (base64) and text transcripts
+- **Metadata**: Timestamps, conversation_id, session_id
 
-OpenAI Response:
-13. OpenAI → Voice Bot: ResponseTextDeltaEvent (text)
-
-Audio Response:
-14. Voice Bot → AudioCodes: playStream.start (streamId, mediaFormat)
-15. OpenAI → Voice Bot: ResponseAudioDeltaEvent (audio base64) [multiple times]
-16. Voice Bot → AudioCodes: playStream.chunk (streamId, audioChunk) [multiple times]
-17. OpenAI → Voice Bot: ResponseDoneEvent
-18. Voice Bot → AudioCodes: playStream.stop (streamId)
-
-Function Calling (Optional):
-19. OpenAI → Voice Bot: FunctionCallEvent (name, arguments)
-20. Voice Bot: Execute function internally
-21. Voice Bot → OpenAI: ConversationItemCreateEvent (function output)
-22. OpenAI → Voice Bot: ResponseTextDeltaEvent (text)
-23. Voice Bot → AudioCodes: playStream.start (newStreamId, mediaFormat)
-24. OpenAI → Voice Bot: ResponseAudioDeltaEvent (audio base64) [multiple times]
-25. Voice Bot → AudioCodes: playStream.chunk (newStreamId, audioChunk) [multiple times]
-26. OpenAI → Voice Bot: ResponseDoneEvent
-27. Voice Bot → AudioCodes: playStream.stop (newStreamId)
-
-Multi-Turn Conversation (Repeats):
-28. AudioCodes → Voice Bot: userStream.start
-29. Voice Bot → AudioCodes: userStream.started
-30. AudioCodes → Voice Bot: userStream.chunk (audioChunk) [multiple times]
-31. Voice Bot → OpenAI: InputAudioBufferAppendEvent (audio base64) [multiple times]
-32. AudioCodes → Voice Bot: userStream.stop
-33. Voice Bot → OpenAI: InputAudioBufferCommitEvent
-34. Voice Bot → AudioCodes: userStream.stopped
-35. OpenAI → Voice Bot: ResponseTextDeltaEvent (text)
-36. Voice Bot → AudioCodes: playStream.start (streamId, mediaFormat)
-37. OpenAI → Voice Bot: ResponseAudioDeltaEvent (audio base64) [multiple times]
-38. Voice Bot → AudioCodes: playStream.chunk (streamId, audioChunk) [multiple times]
-39. OpenAI → Voice Bot: ResponseDoneEvent
-40. Voice Bot → AudioCodes: playStream.stop (streamId)
-
-Call Termination:
-41. AudioCodes → Voice Bot: session.end (reasonCode)
-42. Voice Bot → OpenAI: Close WebSocket Connection
-
-DTMF Handling (Optional):
-43. AudioCodes → Voice Bot: activities (dtmf)
-44. Voice Bot → OpenAI: ConversationItemCreateEvent (dtmf text)
+### Error Recovery
+- **Quota Exhaustion**: Graceful session termination with detailed logging
+- **Connection Loss**: Automatic cleanup and resource deallocation  
+- **Invalid Audio**: Chunk validation and padding
+- **Function Failures**: Error logging while maintaining conversation flow

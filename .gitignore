@@ -179,6 +179,8 @@ recordings/
 
 .vscode/
 *.wav
-!demo/*.wav
+
+# Allow all files in demo folder
+!demo/**
 
 call_recordings/

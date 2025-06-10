@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 from .base_flow import BaseFlow
 from .card_replacement import CardReplacementFlow
 from .loan_application import LoanApplicationFlow
+from .account_inquiry import AccountInquiryFlow
 
 logger = logging.getLogger(__name__)
 
@@ -231,6 +232,7 @@ def create_default_flow_manager() -> FlowManager:
     # Register default flows
     manager.register_flow(CardReplacementFlow())
     manager.register_flow(LoanApplicationFlow())
+    manager.register_flow(AccountInquiryFlow())
 
     # Activate card replacement by default
     manager.activate_flow("card_replacement")

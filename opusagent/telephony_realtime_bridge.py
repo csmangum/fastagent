@@ -18,10 +18,9 @@ from dotenv import load_dotenv
 from fastapi import WebSocket
 from fastapi.websockets import WebSocketDisconnect
 
-from opusagent.base_realtime_bridge import BaseRealtimeBridge
+from opusagent.call_recorder import AudioChannel, CallRecorder, TranscriptType
 from opusagent.config.logging_config import configure_logging
 from opusagent.function_handler import FunctionHandler
-from opusagent.call_recorder import CallRecorder, AudioChannel, TranscriptType
 
 # Import AudioCodes models
 from opusagent.models.audiocodes_api import (
@@ -59,6 +58,7 @@ from opusagent.models.openai_api import (
     SessionUpdatedEvent,
     SessionUpdateEvent,
 )
+from opusagent.pure_prompt import SESSION_PROMPT
 
 load_dotenv()
 
@@ -68,6 +68,8 @@ logger = configure_logging("telephony_realtime_bridge")
 DEFAULT_MODEL = "gpt-4o-realtime-preview-2024-10-01"
 MINI_MODEL = "gpt-4o-mini-realtime-preview-2024-12-17"
 FUTURE_MODEL = "gpt-4o-realtime-preview-2025-06-03"
+
+SELECTED_MODEL = FUTURE_MODEL
 
 # Configuration
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -82,7 +84,7 @@ SYSTEM_MESSAGE = (
     "- For other intents, ask clarifying questions to better understand their needs\n"
     "Always be helpful, professional, and use the information returned by functions to provide relevant follow-up questions."
 )
-VOICE = "alloy"
+VOICE = "verse"
 LOG_EVENT_TYPES = [
     LogEventType.ERROR,
     LogEventType.RESPONSE_CONTENT_DONE,
@@ -150,7 +152,7 @@ class TelephonyRealtimeBridge(BaseRealtimeBridge):
 
         # Initialize function handler
         self.function_handler = FunctionHandler(realtime_websocket)
-        
+
         # Initialize call recorder (will be set up when conversation starts)
         self.call_recorder: Optional[CallRecorder] = None
 
@@ -197,6 +199,54 @@ class TelephonyRealtimeBridge(BaseRealtimeBridge):
             ServerEventType.RESPONSE_FUNCTION_CALL_ARGUMENTS_DONE: self.function_handler.handle_function_call_arguments_done,
         }
 
+    async def close(self):
+        """Safely close both WebSocket connections.
+
+        This method ensures both the telephony and OpenAI Realtime API WebSocket connections
+        are properly closed, handling any exceptions that may occur during the process.
+        """
+        if not self._closed:
+            self._closed = True
+
+            # Stop and finalize call recording
+            if self.call_recorder:
+                try:
+                    await self.call_recorder.stop_recording()
+                    summary = self.call_recorder.get_recording_summary()
+                    logger.info(f"Call recording finalized: {summary}")
+                except Exception as e:
+                    logger.error(f"Error finalizing call recording: {e}")
+
+            try:
+                if (
+                    self.realtime_websocket
+                    and self.realtime_websocket.close_code is None
+                ):
+                    await self.realtime_websocket.close()
+            except Exception as e:
+                logger.error(f"Error closing OpenAI connection: {e}")
+            try:
+                if self.telephony_websocket and not self._is_websocket_closed():
+                    await self.telephony_websocket.close()
+            except Exception as e:
+                logger.error(f"Error closing telephony connection: {e}")
+
+    def _is_websocket_closed(self):
+        """Check if telephony WebSocket is closed.
+
+        Returns True if the WebSocket is closed or in an unusable state.
+        """
+        try:
+            from starlette.websockets import WebSocketState
+
+            return (
+                not self.telephony_websocket
+                or self.telephony_websocket.client_state == WebSocketState.DISCONNECTED
+            )
+        except ImportError:
+            # Fallback check without WebSocketState
+            return not self.telephony_websocket
+
     async def handle_session_initiate(self, data):
         """Handle session.initiate message from telephony client.
 
@@ -207,11 +257,27 @@ class TelephonyRealtimeBridge(BaseRealtimeBridge):
             data (dict): Session initiate message data
         """
         logger.info(f"Session initiate received: {data}")
-        session_init = SessionInitiateMessage(**data)
+        self.conversation_id = data.get("conversationId") or str(uuid.uuid4())
+        logger.info(f"Conversation started: {self.conversation_id}")
 
-        # Store conversation ID
-        self.conversation_id = session_init.conversationId
-        logger.info(f"Session initiated for conversation: {self.conversation_id}")
+        # Get media format
+        self.media_format = data.get("supportedMediaFormats", ["raw/lpcm16"])[0]
+
+        # Set flag to indicate we're waiting for session acceptance
+        self.waiting_for_session_creation = True
+        self.session_initialized = True
+
+        # Initialize call recorder
+        if self.conversation_id:
+            self.call_recorder = CallRecorder(
+                conversation_id=self.conversation_id,
+                session_id=self.conversation_id,
+                base_output_dir="call_recordings",
+            )
+            await self.call_recorder.start_recording()
+            logger.info(
+                f"Call recording started for conversation: {self.conversation_id}"
+            )
 
         # Initialize OpenAI session if not already done
         if not self.session_initialized:
@@ -307,14 +373,85 @@ class TelephonyRealtimeBridge(BaseRealtimeBridge):
                 buffer_commit = InputAudioBufferCommitEvent(
                     type="input_audio_buffer.commit"
                 )
-                await self.realtime_websocket.send(buffer_commit.model_dump_json())
-                logger.info("Audio buffer committed to OpenAI")
+                try:
+                    await self.realtime_websocket.send(buffer_commit.model_dump_json())
+                    logger.info(
+                        f"realtime_websocket_object: {self.realtime_websocket.send}"
+                    )
+                    logger.info(
+                        f"Audio buffer committed with {self.audio_chunks_sent} chunks ({self.total_audio_bytes_sent} bytes)"
+                    )
+                    logger.info(
+                        f"Audio buffer commit sent: {buffer_commit.model_dump_json()}"
+                    )
 
-                # Trigger response
-                await self._trigger_response()
+                    # Only trigger response if no active response
+                    if not self.response_active:
+                        logger.info(
+                            "No active response - creating new response immediately"
+                        )
+                        await self._create_response()
+                    else:
+                        # Queue the user input for processing after current response completes
+                        self.pending_user_input = {
+                            "audio_committed": True,
+                            "timestamp": time.time(),
+                        }
+                        logger.info(
+                            f"User input queued - response already active (response_id: {self.response_id_tracker})"
+                        )
 
-            except Exception as e:
-                logger.error(f"Error committing audio buffer: {e}")
+                        # Double-check if response became inactive while we were setting pending input
+                        if not self.response_active:
+                            logger.info(
+                                "Response became inactive while queuing - processing immediately"
+                            )
+                            await self._create_response()
+                            self.pending_user_input = None
+
+                except Exception as e:
+                    logger.error(
+                        f"Error sending audio buffer commit or response create: {e}"
+                    )
+            else:
+                logger.info(
+                    f"Skipping audio buffer commit - insufficient audio data: "
+                    f"{self.total_audio_bytes_sent} bytes ({total_duration_ms:.1f}ms) "
+                    f"< {min_audio_bytes} bytes (100ms minimum required by OpenAI)"
+                )
+
+            # Send userStream.stopped response regardless of commit
+            stream_stopped = UserStreamStoppedResponse(
+                type=TelephonyEventType.USER_STREAM_STOPPED,
+                conversationId=self.conversation_id,
+            )
+            await self.telephony_websocket.send_json(stream_stopped.model_dump())
+        else:
+            logger.warning(
+                "Cannot commit audio buffer - connection closed or websocket unavailable"
+            )
+
+    async def _create_response(self):
+        """Create a new response request to OpenAI Realtime API.
+
+        This helper method contains the response creation logic extracted from
+        handle_user_stream_stop to enable reuse and better error handling.
+        """
+        try:
+            response_create = {
+                "type": "response.create",
+                "response": {
+                    "modalities": ["text", "audio"],
+                    "output_audio_format": "pcm16",
+                    "temperature": 0.8,
+                    "max_output_tokens": 4096,
+                    "voice": VOICE,
+                },
+            }
+            await self.realtime_websocket.send(json.dumps(response_create))
+            logger.info("Response creation triggered after audio buffer commit")
+        except Exception as e:
+            logger.error(f"Error creating response: {e}")
 
     async def handle_session_end(self, data):
         """Handle session.end message from telephony client.
@@ -545,7 +682,7 @@ class TelephonyRealtimeBridge(BaseRealtimeBridge):
         response_data = response_dict.get("response", {})
         self.response_id_tracker = response_data.get("id")
         logger.info(f"Response generation started: {self.response_id_tracker}")
-        
+
         # Log pending input status for debugging
         if self.pending_user_input:
             logger.info(f"Note: Pending user input exists while starting new response")
@@ -562,9 +699,11 @@ class TelephonyRealtimeBridge(BaseRealtimeBridge):
         """
         response_done = ResponseDoneEvent(**response_dict)
         self.response_active = False
-        response_id = response_done.response.get("id") if response_done.response else None
+        response_id = (
+            response_done.response.get("id") if response_done.response else None
+        )
         logger.info(f"Response generation completed: {response_id}")
-        
+
         # Stop the current play stream if active
         if self.active_stream_id and self.conversation_id:
             stream_stop = PlayStreamStopMessage(
@@ -657,15 +796,15 @@ class TelephonyRealtimeBridge(BaseRealtimeBridge):
         """
         full_transcript = "".join(self.output_transcript_buffer)
         logger.info(f"Full AI transcript (output audio): {full_transcript}")
-        
+
         # Record transcript if recorder is available
         if self.call_recorder and full_transcript.strip():
             await self.call_recorder.add_transcript(
                 text=full_transcript,
                 channel=AudioChannel.BOT,
-                transcript_type=TranscriptType.OUTPUT
+                transcript_type=TranscriptType.OUTPUT,
             )
-        
+
         self.output_transcript_buffer.clear()
         logger.info("Audio transcript completed")
 
@@ -704,15 +843,15 @@ class TelephonyRealtimeBridge(BaseRealtimeBridge):
         """
         full_transcript = "".join(self.input_transcript_buffer)
         logger.info(f"Full user transcript (input audio): {full_transcript}")
-        
+
         # Record transcript if recorder is available
         if self.call_recorder and full_transcript.strip():
             await self.call_recorder.add_transcript(
                 text=full_transcript,
                 channel=AudioChannel.CALLER,
-                transcript_type=TranscriptType.INPUT
+                transcript_type=TranscriptType.INPUT,
             )
-        
+
         self.input_transcript_buffer.clear()
         logger.info("Input audio transcription completed")
 
@@ -808,10 +947,10 @@ async def initialize_session(realtime_websocket):
         input_audio_format="pcm16",
         output_audio_format="pcm16",
         voice=VOICE,
-        instructions=SYSTEM_MESSAGE,
+        instructions=SESSION_PROMPT,
         modalities=["text", "audio"],
         temperature=0.8,
-        model=DEFAULT_MODEL,
+        model=SELECTED_MODEL,
         tools=[
             {
                 "type": "function",
@@ -946,6 +1085,29 @@ async def initialize_session(realtime_websocket):
                 "parameters": {
                     "type": "object",
                     "properties": {"organization_name": {"type": "string"}},
+                },
+            },
+            {
+                "type": "function",
+                "name": "process_replacement",
+                "description": "Process the card replacement",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "card": {
+                            "type": "string",
+                            "description": "The card to replace",
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": "The reason for the card replacement",
+                        },
+                        "address": {
+                            "type": "string",
+                            "description": "The address to send the replacement card",
+                        },
+                    },
+                    "required": ["card", "reason", "address"],
                 },
             },
         ],

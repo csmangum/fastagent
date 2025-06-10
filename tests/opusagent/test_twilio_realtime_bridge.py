@@ -222,15 +222,21 @@ class TestTwilioRealtimeBridge:
             "delta": pcm16_b64,
         }
 
-        # Mock both the websocket closed check and the conversion method
+        # Mock both the websocket closed check and the conversion methods
         with patch.object(self.bridge, "_is_websocket_closed", return_value=False):
-            with patch.object(self.bridge, "_convert_pcm16_to_mulaw") as mock_convert:
-                mock_convert.return_value = b"converted mulaw"
+            with patch.object(self.bridge, "_resample_pcm16") as mock_resample:
+                with patch.object(self.bridge, "_convert_pcm16_to_mulaw") as mock_convert:
+                    # Mock resampling to return the same data
+                    mock_resample.return_value = test_pcm16
+                    mock_convert.return_value = b"converted mulaw"
 
-                await self.bridge.handle_audio_response_delta(response_dict)
+                    await self.bridge.handle_audio_response_delta(response_dict)
 
-                mock_convert.assert_called_once_with(test_pcm16)
-                self.twilio_websocket.send_json.assert_called_once()
+                    # Verify resampling was called with correct parameters
+                    mock_resample.assert_called_once_with(test_pcm16, 24000, 8000)
+                    # Verify conversion was called with resampled data
+                    mock_convert.assert_called_once_with(test_pcm16)
+                    self.twilio_websocket.send_json.assert_called_once()
 
     def test_get_twilio_event_type(self):
         """Test conversion of string event types to TwilioEventType enum."""

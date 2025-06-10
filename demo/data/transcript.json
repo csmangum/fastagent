@@ -1,0 +1,88 @@
+{
+  "conversation_id": "d7ba293c-29d9-44de-bb8a-a8d16b3d10a6",
+  "session_id": "d7ba293c-29d9-44de-bb8a-a8d16b3d10a6",
+  "start_time": "2025-06-07T21:59:42.001523+00:00",
+  "end_time": "2025-06-07T22:00:11.365091+00:00",
+  "entries": [
+    {
+      "timestamp": "2025-06-07T21:59:44.866436+00:00",
+      "channel": "bot",
+      "type": "output",
+      "text": "Hello! How can I help you today?",
+      "confidence": null,
+      "duration_ms": null
+    },
+    {
+      "timestamp": "2025-06-07T21:59:48.281258+00:00",
+      "channel": "caller",
+      "type": "input",
+      "text": "Hi, I need to replace my card.\n",
+      "confidence": null,
+      "duration_ms": null
+    },
+    {
+      "timestamp": "2025-06-07T21:59:48.386324+00:00",
+      "channel": "bot",
+      "type": "output",
+      "text": "I can help with that. Which type of card do you need to replace? We have the Gold card, Silver card, and Basic card available.",
+      "confidence": null,
+      "duration_ms": null
+    },
+    {
+      "timestamp": "2025-06-07T21:59:51.674488+00:00",
+      "channel": "caller",
+      "type": "input",
+      "text": "It's my gold card.\n",
+      "confidence": null,
+      "duration_ms": null
+    },
+    {
+      "timestamp": "2025-06-07T21:59:53.502718+00:00",
+      "channel": "bot",
+      "type": "output",
+      "text": "Thank you for the information. Could you please tell me the reason for replacing your Gold card? Is it Lost, Damaged, Stolen, or Other?",
+      "confidence": null,
+      "duration_ms": null
+    },
+    {
+      "timestamp": "2025-06-07T21:59:59.652420+00:00",
+      "channel": "bot",
+      "type": "output",
+      "text": "I'm sorry to hear that your Gold card is lost. Let's proceed with the replacement. Could you please confirm the address where you'd like the new card to be delivered? Is it the same as the one we have on file?",
+      "confidence": null,
+      "duration_ms": null
+    },
+    {
+      "timestamp": "2025-06-07T22:00:03.135667+00:00",
+      "channel": "caller",
+      "type": "input",
+      "text": "Yes, send it to that address.\n",
+      "confidence": null,
+      "duration_ms": null
+    },
+    {
+      "timestamp": "2025-06-07T22:00:06.507401+00:00",
+      "channel": "bot",
+      "type": "output",
+      "text": "I will proceed with sending your new Gold card to the address we have on file. Please allow a few business days for the card to arrive. Is there anything else I can help you with today?",
+      "confidence": null,
+      "duration_ms": null
+    },
+    {
+      "timestamp": "2025-06-07T22:00:09.762843+00:00",
+      "channel": "caller",
+      "type": "input",
+      "text": "Thanks, that's all.\n",
+      "confidence": null,
+      "duration_ms": null
+    },
+    {
+      "timestamp": "2025-06-07T22:00:11.272036+00:00",
+      "channel": "bot",
+      "type": "output",
+      "text": "You're welcome! If you need any further assistance, feel free to reach out. Have a great day!",
+      "confidence": null,
+      "duration_ms": null
+    }
+  ]
+}

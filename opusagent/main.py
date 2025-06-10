@@ -12,12 +12,17 @@ handlers, and maintains conversation state throughout the call session.
 
 import asyncio
 import os
+import sys
 from pathlib import Path
+import wave
+import base64
 
 import dotenv
 import websockets
 from dotenv import load_dotenv
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, WebSocket, Request
+from fastapi.responses import Response
+from twilio.twiml.voice_response import VoiceResponse
 
 from opusagent.config.logging_config import configure_logging
 from opusagent.telephony_realtime_bridge import (
@@ -30,7 +35,7 @@ load_dotenv()
 
 # Configuration
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-
+SERVER_URL = "wss://grand-collie-complete.ngrok-free.app/twilio-agent"
 # Load environment variables from .env file if it exists
 env_path = Path(".") / ".env"
 if env_path.exists():
@@ -170,6 +175,28 @@ async def handle_twilio_call(twilio_websocket: WebSocket):
         await twilio_websocket.close()
 
 
+@app.post("/twilio/voice")
+async def twilio_voice(request: Request):
+    """Handle incoming Twilio voice calls.
+    
+    This endpoint receives incoming voice calls from Twilio and responds with TwiML
+    instructions to connect the call to our WebSocket endpoint for real-time AI interaction.
+    """
+    logger.info(f"------ Incoming Twilio voice call ------")    
+    # Create a TwiML response
+    response = VoiceResponse()
+    logger.info(f" Response: {response}")
+    # Connect the call to our WebSocket endpoint using the public URL
+    connect = response.connect()
+    logger.info(f"------ Connecting call to WebSocket endpoint ------")
+    logger.info(f"------ {SERVER_URL} ------")
+    connect.stream(url=SERVER_URL)
+    logger.info(f"------ Connected call to WebSocket endpoint ------")
+    
+    # Return XML response with proper Content-Type header
+    return Response(content=str(response), media_type="application/xml")
+
+
 @app.get("/")
 async def root():
     """Root endpoint to display basic information about the API.
@@ -184,6 +211,7 @@ async def root():
         "endpoints": {
             "/voice-agent": "WebSocket endpoint for AudioCodes VoiceAI Connect",
             "/twilio-agent": "WebSocket endpoint for Twilio Media Streams",
+            "/twilio/voice": "Webhook endpoint for incoming Twilio voice calls",
         },
     }
 
@@ -192,16 +220,20 @@ if __name__ == "__main__":
     import uvicorn
 
     logger.info(f"Starting server on http://{HOST}:{PORT}")
-    # Configure uvicorn with low buffer sizes for minimal latency
+    # Configure uvicorn with optimized settings for real-time audio
     uvicorn.run(
         app,
         host=HOST,
         port=PORT,
-        # Low write buffer size to minimize buffering and reduce latency
-        # This ensures WebSocket messages are sent as soon as possible
-        websocket_ping_interval=5,  # More frequent pings to keep connections alive
-        websocket_max_size=16777216,  # 16MB - large enough for audio chunks
-        websocket_ping_timeout=20,  # Timeout for pings to detect dead connections
+        # Optimized WebSocket settings for low latency audio streaming
+        websocket_ping_interval=10,  # Reduce ping frequency to avoid interference with audio
+        websocket_max_size=4194304,  # 4MB - optimal for audio chunks without excessive buffering
+        websocket_ping_timeout=30,  # Longer timeout for stability
         # Use HTTP/1.1 for lower overhead than HTTP/2
         http="h11",
+        # Additional performance optimizations
+        loop="asyncio",
+        timeout_keep_alive=30,
+        limit_concurrency=1000,
+        limit_max_requests=10000,
     )

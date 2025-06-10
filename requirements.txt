@@ -23,7 +23,7 @@ textual>=0.41.0
 rich>=13.0.0
 
 # Optional audio backends
-# pyaudio>=0.2.11  # Alternative audio backend (uncomment if needed)
+pyaudio==0.2.13
 
 # Development and testing
 pytest==8.0.0
